@@ -1,0 +1,112 @@
+#!/usr/bin/env -S bash -euET -o pipefail -O inherit_errexit
+
+# Re-exec as superuser so we have permissions to docker, mounts, etc
+if [[ ${EUID} -ne 0 ]]; then
+    exec sudo "$0" "$@"
+fi
+
+function help()
+{
+    echo
+    echo "binder <CONTAINER> <HOST_DIR> <CONTAINER_DIR>"
+    echo "binder [-u | -d] <CONTAINER> <CONTAINER_DIR>"
+    echo "Add/remove a temporary bind mount in a container"
+    echo
+    echo "  -u              remove (unmount) the mount instead of adding it"
+    echo "  -d              remote the mount and delete the container dir. This may delete container data!"
+    echo "  CONTAINER       the name or ID of the container to add the bind mount to"
+    echo "  HOST_DIR        the path of the host directory to mount"
+    echo "  CONTAINER_DIR   the path inside the container for the mount"
+}
+
+# Process options
+unmount=0
+del_mount=0
+OPTIND=1
+while getopts "h?d:" opt; do
+    case "${opt}" in
+        h|\?)
+            help; exit 0 ;;
+        d)
+            del_mount=1; shift ;;
+        u)
+            unmount=1; shift ;;
+        *)
+            break ;;
+    esac
+done
+if [[ ${del_mount} -eq 1 ]]; then
+    unmount=1
+fi
+
+# Process positional args
+container_name=${1-}
+if [[ -z ${container_name} ]]; then
+    echo "Missing container name/ID"
+    help
+    exit 1
+fi
+
+if [[ ${unmount} -eq 0 ]]; then
+    host_dir=${2-}
+    if [[ -z ${host_dir} ]]; then
+        echo "Missing host directory"
+        help
+        exit 1
+    fi
+    container_dir=${3-}
+    if [[ -z ${container_dir} ]]; then
+        echo "Missing container directory"
+        help
+        exit 1
+    fi
+else
+    container_dir=${2-}
+    if [[ -z ${container_dir} ]]; then
+        echo "Missing container directory"
+        help
+        exit 1
+    fi
+    if [[ -n ${3-} ]]; then
+        echo "Too many arguments"
+        help
+        exit 1
+    fi
+fi
+
+# Check if jq is installed
+if ! which jq &>/dev/null; then
+    echo "Please install jq"
+    exit 1
+fi
+
+
+
+# Get the container info. This also checks if the container exists
+inspect=$(docker container inspect ${container_name})
+
+# Check that the container is using overlay2 driver
+driver_name=$(echo "${inspect}" | jq -r '.[0].GraphDriver.Name')
+if [[ "${driver_name}" != "overlay2" ]]; then
+    echo "This script only works with overlay2 storage driver"
+    exit 1
+fi
+
+# Find the top level/merged dir for the container
+merge_dir=$(echo "${inspect}" | jq -r '.[0].GraphDriver.Data.MergedDir')
+
+set -x
+# Create the container dir if it does not exist
+mkdir -p "${merge_dir}"/"${container_dir}"
+
+# Mount or unmount the host directory in the container
+if [[ ${unmount} -eq 1 ]]; then
+    if mountpoint -q "${merge_dir}"/"${container_dir}"; then
+        umount "${merge_dir}"/"${container_dir}"
+    fi
+    if [[ ${del_mount} -eq 1 && -e "${merge_dir}"/"${container_dir}" ]]; then
+        rm -r "${merge_dir}"/"${container_dir}"
+    fi
+else
+    mount --bind --make-rshared "${host_dir}" "${merge_dir}"/"${container_dir}"
+fi
