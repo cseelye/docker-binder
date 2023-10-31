@@ -95,7 +95,6 @@ fi
 # Find the top level/merged dir for the container
 merge_dir=$(echo "${inspect}" | jq -r '.[0].GraphDriver.Data.MergedDir')
 
-set -x
 # Create the container dir if it does not exist
 mkdir -p "${merge_dir}"/"${container_dir}"
 
